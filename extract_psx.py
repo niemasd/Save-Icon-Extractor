@@ -32,7 +32,7 @@ def parse_args():
         raise ValueError(f"File not found: {args.input}")
     args.output = Path(args.output)
     if args.output.exists():
-        raise ValueError(f"Output folder exists: {args.output}")
+        raise ValueError(f"Output exists: {args.output}")
     return args
 
 # parse icons from a PSX disc image file stream
