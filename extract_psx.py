@@ -17,7 +17,7 @@ filterwarnings('ignore')
 
 # constants
 DEFAULT_BUFSIZE = 1048576 # 1 MB
-REGEX_CNF_BOOT = r"BOOT\s*=\s*cdrom:\\?([^\s\n\r]+)"
+REGEX_TIM_4BIT = re.compile(b'\x10\x00\x00\x00\x08\x00\x00\x00')
 ICON_TYPES = {0x11, 0x12, 0x13}
 
 # parse user args
@@ -35,68 +35,51 @@ def parse_args():
         raise ValueError(f"Output folder exists: {args.output}")
     return args
 
-# parse save icons from a PSX disc image file stream
+# parse icons from a PSX disc image file stream
 def parse_icons(file_obj, quiet=False):
-    # load files from PSX disc image
     it = IsoFS(file_obj)
     if not quiet:
-        it = tqdm(it, desc="Loading files from disc image")
-    files = {curr_path:curr_data for curr_path, curr_timestamp, curr_data in it}
-    try:
-        cnf_path, cnf_data = [(p, d) for p, d in files.items() if p.name.upper().startswith('SYSTEM.CNF')][0]
-    except IndexError:
-        raise ValueError("Invalid PSX disc image: file 'SYSTEM.CNF' not found")
-
-    # determine main EXE from SYSTEM.CNF
-    if not quiet:
-        print("Finding executable path from 'SYSTEM.CNF'...", file=stderr)
-    match = re.match(REGEX_CNF_BOOT, cnf_data.decode(), re.IGNORECASE)
-    if not match:
-        raise ValueError("Invalid PSX disc image: no 'BOOT' line in 'SYSTEM.CNF'")
-    exe_path = Path(match.group(1).strip())
-    if not quiet:
-        print(f"Executable determined from 'SYSTEM.CNF': {exe_path}")
-
-    # scan executable for save data
-    try:
-        exe_data = files[exe_path]
-    except KeyError:
-        raise ValueError(f"Invalid PSX disc image: executable '{exe_path}' not on disc")
-    it = range(len(exe_data) - 352)
-    if not quiet:
-        it = tqdm(it, desc=f"Scanning '{exe_path}' for save data")
+        it = tqdm(it, desc="Scanning disc files")
     icons = list()
-    for offset in it:
-        # skip if no save data header magic bytes
-        if exe_data[offset : offset + 2] != b'SC':
-            continue
-
-        # parse icon type + block count (and skip if invalid)
-        icon_type = exe_data[offset + 2]
-        if icon_type not in ICON_TYPES:
-            continue
-        block_count = data[offset + 3]
-        if block_count < 1 or block_count > 15:
-            continue
-
-        # parse icon block (352 bytes: 0-63 = header/title, 64-95 = reserved, 96-223 = 16-color CLUT, 224-351 = 4-bit bitmap)
-        num_frames = icon_type & 0x0F
-        total_icon_size = 224 + (num_frames * 128)
-        icon_data = exe_data[offset : offset + total_icon_size]
-        icons.append(icon_data)
+    for curr_path, curr_timestamp, curr_data in it:
+        if curr_data is None:
+            continue # skip folders
+        for match in REGEX_TIM_4BIT.finditer(curr_data):
+            offset = match.start()
+            if len(curr_data) < offset + 16:
+                continue
+            clut_size = int.from_bytes(curr_data[offset+8 : offset+12], byteorder='little')
+            img_size_offset = offset + 12 + clut_size
+            if len(curr_data) < img_size_offset + 4:
+                continue
+            img_size = int.from_bytes(curr_data[img_size_offset : img_size_offset+4], byteorder='little')
+            total_tim_size = 12 + clut_size + img_size
+            if len(curr_data) < (offset + total_tim_size):
+                continue
+            icons.append(curr_data[offset : offset + total_tim_size])
     return icons
 
 # main program logic
-def main():
+def main(bufsize=DEFAULT_BUFSIZE):
     args = parse_args()
     if not args.quiet:
         print(f"Input PSX Disc Image: {args.input}", file=stderr)
-    with open(args.input, 'rb', buffering=DEFAULT_BUFSIZE) as f:
-        icons = parse_icons(f, quiet=args.quiet)
+    with open(args.input, 'rb', buffering=bufsize) as iso_f:
+        icons = parse_icons(iso_f, quiet=args.quiet)
     if len(icons) == 0:
-        print(f"No icons found", file=stderr)
-    else:
-        print(f"Writing icons to output: {args.output}", file=stderr)
+        if not args.quiet:
+            print(f"No icons found", file=stderr)
+        return
+    if not args.quiet:
+        print(f"Writing {len(icons)} icon(s) to output: {args.output}", file=stderr)
+    args.output.mkdir()
+    int_len = len(str(len(icons)-1))
+    it = enumerate(icons)
+    if not args.quiet:
+        it = tqdm(it, desc='Writing TIM file', total=len(icons))
+    for i, tim_data in it:
+        with open(args.output / f'{str(i).zfill(int_len)}.tim', mode='wb', buffering=bufsize) as tim_f:
+            tim_f.write(tim_data)
 
 # run tool
 if __name__ == "__main__":
